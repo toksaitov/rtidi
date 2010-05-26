@@ -1,0 +1,9 @@
+doc
+pkg
+releases
+tmp
+.DS_Store
+.idea
+*.gem
+*.log
+*~

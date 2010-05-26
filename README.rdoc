@@ -1,0 +1,374 @@
+= RTiDI
+
+== Description
+
+RTiDI is a simple library that implements a dependency injection pattern that
+can be used in applications to avoid usage of highly coupled dependencies.
+
+More information on the topic of DI:
+* http://en.wikipedia.org/wiki/Dependency_injection
+
+== Requirements
+
+* A Ruby language implementation that supports the official 1.8.6 language level
+
+=== Dependencies
+
+none
+
+=== Extra Development Dependencies
+
+* hoe (version 2.5.0 or later)
+
+== Installation
+
+=== Gem Installation
+
+The preferred method of installation is through the _Gem_ file.
+For this you will need to have the *RubyGems* library installed.
+
+You can install the application and all its dependencies with
+the following command:
+
+    gem install rtidi
+
+=== Manual Installation
+
+You can clone, download or whatever else to get the library package
+from the *GitHub*.
+
+== Library Usage
+
+So let's start from a simple example.
+
+We will define some common services and assets for a sample application that
+deals with a task of report generation.
+
+  # lib/context.rb
+
+  require 'rtidi'
+
+  di :directories do
+    asset :rc do
+      # File#prepare_directory is a silent wrapper for the Dir#mkdir method
+      File.prepare_directory('~' / '.apprc') # String#/ is an extension
+                                             # that just wraps the
+                                             # File#expand_path method
+    end
+
+    asset :logs do
+      File.prepare_directory(di(:directories)[:rc] / 'logs')
+    end
+  end
+
+  di :files do
+    asset :log do
+      di(:directories)[:logs] / 'log.txt'
+    end
+
+    asset :options do
+      di(:directories)[:rc] / 'options.yml'
+    end
+  end
+
+  di :services do
+    service :logger do
+      on_creation do
+        require 'logger'
+
+        log_shift_options = di(:parameters)[options][:log_shift_age],
+                            di(:parameters)[options][:log_shift_size]
+
+        logger = Logger.new(di(:files)[:log], *log_shift_options)
+        logger.level = Logger::INFO
+
+        logger
+      end
+
+      interface :log do |instance, message|
+        instance.info(message)
+      end
+    end
+
+    service :report_generator do
+      on_creation do
+        case di(:parameters)[options][:view_processor]
+          when :erb
+            require 'erb'; ERB
+          when :haml
+            require 'haml'; Haml
+        end
+      end
+
+      interface :render do |instance, text|
+        case instance
+          when ERB
+            instance.new(text).result()
+          when Haml
+            instance::Engine.new(text).render()
+        end
+      end
+    end
+  end
+
+  di :parameters do
+    asset :options => { :log_shift_age  = 10,
+                        :log_shift_size = 1048576,
+                        :view_processor = :erb },
+          :file => di(:files)[:options]
+  end
+
+  # lib/app.rb
+
+  require 'lib/context'
+
+  # The first access call will create the application directories,
+  # serialize default application options to them in YAML (so the user will
+  # be able to edit them later), and initialize a logger instance with this
+  # predefined parameters
+  logger = di(:services)[:logger]
+
+  # Here we will call the defined interface
+  logger.log('The application was initialized')
+
+  # Now the initialization logic will not be used because the object is
+  # accessed through the DI container for the second time.
+  #
+  # Now an already initialized instance will be returned.
+  di(:services)[:logger].info('Starting...')
+
+  # Application logic
+  # ...
+  data = ...
+
+  # Now a specific markup processor will be initialized for the first time
+  # By default it will be the ERB class. The user can change ERB in the
+  # generated options.yml to Haml and on the next application boot the
+  # :report_generator service will be using it instead
+  result = di(:services)[:report_generator].render(data)
+
+Here we have created several DI containers that store some common assets and
+contains some basic services for logging and dealing with a markup processors.
+
+Assume that you have decided that the logger from the Ruby standard library
+is too much for this small application and the +STDOUT+ stream will do just
+fine here. In order to switch from the logger to the +STDOUT+ stream instance
+you need just to correct the +:logger+ service definition in the +:services+ DI
+container.
+
+  service :logger do
+    on_creation do
+      STDOUT
+    end
+
+    interface :log do |instance, message|
+      instance.puts(message)
+    end
+  end
+
+That's all!
+
+Now the +logger.log('The application was initialized')+
+expression will write a line of text to the standard output instead of
+outputting it to the +~/.apprc/logs/log.txt+ through the logger from
+the standard Ruby library.
+
+As you can see in the application logic we were not using the instances directly
+rather we were working with them through a proxy that was routing method
+calls to appropriate instances.
+
+So a container can store services or assets. What are they?
+
+A service is a unit that stores an initialization logic of a specific
+dependency and can also contain some additional defined operations for it
+that are called interfaces. If a user wants to use a specific type of library
+in the project and does not want to be attached to a specific implementation,
+he can create a DI container, define a service, describe an initialization
+logic for a specific library, define a set of interfaces through which he
+will use this library and, of course, use the library in the application
+through this set of interfaces. Thus he will not bound himself to a specific
+implementation and it case of changes he will need only to change the
+initialization and usage logic in the container.
+
+An asset is a service that stores only an instance of the dependency or an
+initialization logic for it. An asset can not contain interfaces. An asset can
+be serialized to YAML and can be automatically loaded from it. Assets are useful
+to outline simple elements of the application. In the first example assets were
+used to prepare (create) and to store an expanded path to the application
+directories and to the log file. An asset was also used to serialize and
+load application parameters.
+
+A life cycle of services and assets is the following:
+
+1. Services and assets are defined in the DI container with the +service+ or
+    +asset+ methods.
+
+2. When a service or asset is accessed for the first time the initialization
+    block is called (if defined). If the block was not provided, a raw instance
+    will be returned (only possible in assets). If the block was given, a result
+    from the block invocation is returned and stored in the service or asset
+    instance.
+
+3. All subsequent access calls will return the initialized instance that was
+    saved in the asset or service unless an +:init+ option was passed with
+    the access method call.
+
+A DI container can be defined with a +Kernel#di+ method. If the name for
+the container was specified, the initialized container is added to
+the +DI::CONTAINERS+ hash and can be later accessed through it.
+The +Kernel#di+ also allows to access a specific named containers from
+the +DI::CONTAINERS+ if an initialization block was not provided in
+the method call. A DI container can also be created with the use of
+the +DI::Container+ class with a basic Ruby class initialization syntax.
+In this case the newly created container is not added to the +DI::CONTAINERS+
+hash.
+
+Container definition
+
+  di :container_name do # An instance will be added
+    # ...               # to the +DI::CONTAINERS+
+  end
+
+  container = di do # An instance will NOT be added
+    # ...           # to the +DI::CONTAINERS+
+  end
+
+  container = DI::Container.new do # The same thing
+    # ...
+  end
+
+Container access
+
+  container = di :container_name # This will try to get a container from the
+                                 # DI::CONTAINERS hash
+
+  container = di(:container_name)             # The same thing
+  container = DI::CONTAINERS[:container_name] # ...
+
+Access to services and assets
+
+  container = di :container_name
+
+  service = container[:service_name] # The first call will initialize
+                                     # the service
+
+  service = container[:service_name] # The second call will return
+                                     # an initialized instance
+
+  service = container[:service_name, :init] # The :init option will initialize
+                                            # the service again
+
+  # The same goes to assets
+  asset = container[:asset_name]
+  # ...
+
+Services definition
+
+  di :sample_container do
+    service :service_name do # Defines a service
+      on_creation do # Defines an initialization block that will be
+        #...         # invoked only during the first service access call
+      end
+
+      # Note that the first parameter represents
+      # an instance of the wrapped object
+      interface :interface_name do |instance, arg, ...| # Defines a new
+        instance.do_something_with(arg)                 # method for the
+        # ...                                           # service
+      end
+
+      # Several interfaces can be defined at the same time
+      interface :first_interface, :second_interface do |instance, arg|
+        # ...
+      end
+    end
+  end
+
+Asset definition
+
+  di :sample_container do
+    asset :asset_name do # Defines an asset
+      # An initialization logic that will be
+      # used only during the first access call
+    end
+
+    # Defines an asset that stores an instance that does not
+    # need much of the initialization logic
+    asset :another_asset_name => instance
+
+    # Asset serialization with YAML
+    #
+    # If the file exists, the container will try to load it and return on
+    # receiving an access call.
+    #
+    # If the file does not exist, the container will try to serialize the
+    # value returned from the initialization block or an actual instance (if
+    # an alternative hash form was used in the asset definition) to the
+    # specified file.
+    #
+    # Changes in the definition of the +DI::Service+ instance that represents
+    # a specific asset will lead to the +DI::Service#update+ call that will try
+    # to serialize the service again reflecting the new definition.
+    #
+    # Assets with serialization are useful for maintenance of the application
+    # configuration files.
+    asset :asset_that_will_be_serialized, :file => '~/.apprc/options.yml' do
+      { :first_param => true,
+        :second_param => false }
+    end
+  end
+
+Best practises
+
+* Use DI container services only for dependencies that can possibly be
+  changed in the future. Do not bloat your code with tons of abstractions.
+
+* It is recommended to define all application dependencies in external
+  ruby source files (even though it is not strictly required).
+
+== Development
+
+=== Source Repositories
+
+Scenario is currently hosted at GitHub.
+
+The RubyGems page
+* http://rubygems.org/gems/rtidi
+
+The RubyForge page
+* http://rubyforge.org/projects/rtidi
+
+The GitHub web page
+* http://github.com/toksaitov/rtidi
+
+The public git clone URL
+* git://github.com/toksaitov/rtidi.git
+* http://github.com/toksaitov/rtidi.git
+
+== Contact Information
+
+Author:: Toksaitov Dmitrii <toksaitov.d@gmail.com>
+
+== License
+
+(The MIT License)
+
+Copyright (c) 2010 Dmitrii Toksaitov
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
